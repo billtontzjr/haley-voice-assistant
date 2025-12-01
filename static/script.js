@@ -1,8 +1,10 @@
 let socket;
 let audioContext;
+let playbackContext;
 let isRecording = false;
 let audioQueue = [];
 let isPlaying = false;
+let nextPlayTime = 0;
 
 const startBtn = document.getElementById('start-btn');
 const stopBtn = document.getElementById('stop-btn');
@@ -26,6 +28,11 @@ async function startSession() {
             statusIndicator.classList.add('online');
             startBtn.disabled = true;
             stopBtn.disabled = false;
+
+            // Create playback context on user interaction (required by browsers)
+            playbackContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+            nextPlayTime = 0;
+
             startAudioCapture(stream);
         };
 
@@ -118,10 +125,15 @@ function stopSession() {
     isRecording = false;
     audioQueue = [];
     isPlaying = false;
+    nextPlayTime = 0;
 
     if (audioContext) {
         audioContext.close();
         audioContext = null;
+    }
+    if (playbackContext) {
+        playbackContext.close();
+        playbackContext = null;
     }
     if (socket && socket.readyState === WebSocket.OPEN) {
         socket.close();
@@ -147,19 +159,27 @@ async function playNextAudio() {
         return;
     }
 
+    if (!playbackContext || playbackContext.state === 'closed') {
+        console.error('Playback context not available');
+        isPlaying = false;
+        return;
+    }
+
     isPlaying = true;
     const base64Data = audioQueue.shift();
 
     try {
+        // Resume context if suspended (browser autoplay policy)
+        if (playbackContext.state === 'suspended') {
+            await playbackContext.resume();
+        }
+
         // Decode base64 to ArrayBuffer
         const binaryString = atob(base64Data);
         const bytes = new Uint8Array(binaryString.length);
         for (let i = 0; i < binaryString.length; i++) {
             bytes[i] = binaryString.charCodeAt(i);
         }
-
-        // Create audio context for playback if needed
-        const playbackContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
 
         // Convert Int16 PCM to Float32 for Web Audio API
         const int16Array = new Int16Array(bytes.buffer);
@@ -176,12 +196,17 @@ async function playNextAudio() {
         source.buffer = audioBuffer;
         source.connect(playbackContext.destination);
 
+        // Schedule seamless playback
+        const currentTime = playbackContext.currentTime;
+        const startTime = Math.max(currentTime, nextPlayTime);
+        nextPlayTime = startTime + audioBuffer.duration;
+
         source.onended = () => {
-            playbackContext.close();
             playNextAudio();
         };
 
-        source.start();
+        source.start(startTime);
+        console.log('Playing audio chunk, duration:', audioBuffer.duration);
     } catch (e) {
         console.error('Audio playback error:', e);
         playNextAudio();
