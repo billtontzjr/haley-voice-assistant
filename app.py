@@ -88,16 +88,40 @@ async def debug_gemini():
         result["error"] = "GEMINI_API_KEY not configured"
         return result
     
+    # List available models
     try:
-        # Test Gemini
-        test_model = genai.GenerativeModel("gemini-pro")
-        response = test_model.generate_content("Say hello in one word")
-        result["gemini_test"] = "SUCCESS"
-        result["gemini_response"] = response.text[:100] if response.text else "Empty response"
+        available_models = []
+        for m in genai.list_models():
+            if 'generateContent' in [method.name for method in m.supported_generation_methods]:
+                available_models.append(m.name)
+        result["available_models"] = available_models[:10]  # First 10
     except Exception as e:
-        result["gemini_test"] = "FAILED"
-        result["gemini_error"] = f"{type(e).__name__}: {str(e)}"
-        result["traceback"] = traceback.format_exc()
+        result["list_models_error"] = str(e)
+    
+    # Try different model names
+    models_to_try = [
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-pro-latest", 
+        "gemini-pro",
+        "models/gemini-pro",
+        "gemini-1.0-pro",
+    ]
+    
+    for model_name in models_to_try:
+        try:
+            test_model = genai.GenerativeModel(model_name)
+            response = test_model.generate_content("Say hi")
+            result["gemini_test"] = "SUCCESS"
+            result["working_model"] = model_name
+            result["gemini_response"] = response.text[:100] if response.text else "Empty"
+            break
+        except Exception as e:
+            if "gemini_errors" not in result:
+                result["gemini_errors"] = {}
+            result["gemini_errors"][model_name] = str(e)[:100]
+    
+    if "gemini_test" not in result:
+        result["gemini_test"] = "FAILED - No models worked"
     
     return result
 
