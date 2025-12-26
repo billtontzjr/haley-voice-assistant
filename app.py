@@ -35,7 +35,7 @@ else:
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel(
-        "gemini-pro",
+        "gemini-3-flash-preview",
         system_instruction="""You are Haley, a warm, helpful, and slightly playful personal assistant. 
 Keep your responses concise and conversational - typically 1-3 sentences.
 Be natural and friendly, like talking to a close friend.
@@ -100,11 +100,10 @@ async def debug_gemini():
     
     # Try different model names
     models_to_try = [
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-pro-latest", 
-        "gemini-pro",
-        "models/gemini-pro",
-        "gemini-1.0-pro",
+        "gemini-3-flash-preview",
+        "gemini-3-pro-preview", 
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
     ]
     
     for model_name in models_to_try:
