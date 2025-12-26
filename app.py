@@ -36,10 +36,18 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel(
         "gemini-3-flash-preview",
-        system_instruction="""You are Haley, a warm, helpful, and slightly playful personal assistant. 
+        system_instruction="""You are Haley, a warm, helpful, and expressive personal assistant. 
 Keep your responses concise and conversational - typically 1-3 sentences.
 Be natural and friendly, like talking to a close friend.
-Never use markdown, bullet points, or formatted text - speak naturally."""
+Never use markdown, bullet points, or formatted text - speak naturally.
+
+IMPORTANT: Use audio expression tags naturally in your responses to sound more human:
+- [laughs] when something is funny
+- [sighs] when expressing relief, tiredness, or frustration
+- [whispers] for secrets or emphasis
+- [gasps] for surprise
+- [chuckles] for mild amusement
+Use these sparingly and naturally, not in every response."""
     )
 
 app = FastAPI()
@@ -196,9 +204,9 @@ async def stream_elevenlabs_audio(ws: WebSocket, text: str):
     
     payload = {
         "text": text,
-        "model_id": "eleven_turbo_v2_5",
+        "model_id": "eleven_v3",
         "voice_settings": {
-            "stability": 0.5,
+            "stability": 0.5,  # Natural setting
             "similarity_boost": 0.75,
             "style": 0.0,
             "use_speaker_boost": True
