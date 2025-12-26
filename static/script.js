@@ -8,6 +8,7 @@ let audioContext = null;
 let audioQueue = [];
 let isPlaying = false;
 let lastAssistantText = ''; // For echo detection
+let audioPlayer = new Audio(); // HTML5 Audio element for better iOS compatibility
 
 // DOM Elements
 const micBtn = document.getElementById('mic-btn');
@@ -58,6 +59,14 @@ async function startConversation() {
 
             // iOS audio unlock hack - play a silent buffer to "unlock" audio
             unlockAudioForIOS();
+
+            // Also unlock the HTML5 audio element
+            audioPlayer.src = 'data:audio/mp3;base64,//NExAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//NExAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq';
+            audioPlayer.volume = 0;
+            audioPlayer.play().then(() => {
+                console.log('HTML5 Audio unlocked');
+                audioPlayer.volume = 1;
+            }).catch(e => console.log('HTML5 Audio unlock failed', e));
 
             // Start speech recognition
             startRecognition();
@@ -281,25 +290,34 @@ async function playCompleteAudio() {
     audioQueue = [];
 
     try {
-        // Decode the complete MP3 audio
-        const audioBuffer = await audioContext.decodeAudioData(combinedBuffer.slice(0));
+        // Create a Blob from the buffer and stream it via HTML5 Audio
+        // This is much more robust on iOS than Web Audio API
+        const blob = new Blob([combinedBuffer], { type: 'audio/mpeg' });
+        const audioUrl = URL.createObjectURL(blob);
 
-        // Play the complete audio
-        const source = audioContext.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(audioContext.destination);
+        audioPlayer.src = audioUrl;
+        audioPlayer.volume = 1;
 
         // Wait for audio to complete
         return new Promise((resolve) => {
-            source.onended = () => {
+            audioPlayer.onended = () => {
                 isPlaying = false;
                 console.log('Audio playback complete');
+                URL.revokeObjectURL(audioUrl); // Clean up
                 resolve();
             };
-            source.start();
+
+            const playPromise = audioPlayer.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(error => {
+                    console.error('Audio playback failed:', error);
+                    isPlaying = false;
+                    resolve();
+                });
+            }
         });
     } catch (e) {
-        console.error('Audio decode error:', e);
+        console.error('Audio error:', e);
         isPlaying = false;
     }
 }
