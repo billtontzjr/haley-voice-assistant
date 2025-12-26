@@ -207,16 +207,18 @@ async function handleMessage(data) {
             }
             updateStatus('speaking', 'Speaking...');
             listeningText.textContent = 'Speaking...';
-            audioQueue = [];
+            audioQueue = []; // Clear buffer for new audio
+            isPlaying = false;
             break;
 
         case 'audio_chunk':
-            queueAudioChunk(data.data);
+            // Just buffer the chunk, don't play yet (iOS compatibility)
+            bufferAudioChunk(data.data);
             break;
 
         case 'audio_end':
-            // Wait for audio to finish, then resume listening
-            await waitForAudioEnd();
+            // Now play the complete buffered audio
+            await playCompleteAudio();
             isSpeaking = false; // Allow recognition again
             if (isListening) {
                 updateStatus('listening', 'Listening...');
@@ -246,22 +248,17 @@ async function handleMessage(data) {
     }
 }
 
-function queueAudioChunk(base64Data) {
-    // Decode base64 to array buffer
+function bufferAudioChunk(base64Data) {
+    // Decode base64 to array buffer and add to queue
     const binaryString = atob(base64Data);
     const bytes = new Uint8Array(binaryString.length);
     for (let i = 0; i < binaryString.length; i++) {
         bytes[i] = binaryString.charCodeAt(i);
     }
-
     audioQueue.push(bytes.buffer);
-
-    if (!isPlaying) {
-        playAudioQueue();
-    }
 }
 
-async function playAudioQueue() {
+async function playCompleteAudio() {
     if (audioQueue.length === 0 || !audioContext) {
         isPlaying = false;
         return;
@@ -279,36 +276,31 @@ async function playAudioQueue() {
         }
     }
 
-    // Combine all chunks into one buffer
+    // Combine ALL chunks into one complete audio buffer
     const combinedBuffer = combineArrayBuffers(audioQueue);
     audioQueue = [];
 
     try {
-        // Decode MP3 audio
+        // Decode the complete MP3 audio
         const audioBuffer = await audioContext.decodeAudioData(combinedBuffer.slice(0));
 
-        // Play the audio
+        // Play the complete audio
         const source = audioContext.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(audioContext.destination);
 
-        source.onended = () => {
-            if (audioQueue.length > 0) {
-                playAudioQueue();
-            } else {
+        // Wait for audio to complete
+        return new Promise((resolve) => {
+            source.onended = () => {
                 isPlaying = false;
-            }
-        };
-
-        source.start();
+                console.log('Audio playback complete');
+                resolve();
+            };
+            source.start();
+        });
     } catch (e) {
         console.error('Audio decode error:', e);
         isPlaying = false;
-
-        // Try to play remaining chunks
-        if (audioQueue.length > 0) {
-            setTimeout(() => playAudioQueue(), 100);
-        }
     }
 }
 
