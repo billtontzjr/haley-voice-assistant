@@ -7,6 +7,7 @@ let isSpeaking = false; // Prevents recognition during audio playback
 let audioContext = null;
 let audioQueue = [];
 let isPlaying = false;
+let lastAssistantText = ''; // For echo detection
 
 // DOM Elements
 const micBtn = document.getElementById('mic-btn');
@@ -113,9 +114,17 @@ function startRecognition() {
             listeningText.textContent = interimTranscript;
         }
 
-        // Send final transcript to server
+        // Send final transcript to server (with echo detection)
         if (finalTranscript.trim()) {
-            sendMessage(finalTranscript.trim());
+            const userText = finalTranscript.trim();
+
+            // Echo detection: check if user is just repeating what assistant said
+            if (isEcho(userText, lastAssistantText)) {
+                console.log('Echo detected, ignoring:', userText);
+                return;
+            }
+
+            sendMessage(userText);
         }
     };
 
@@ -176,6 +185,7 @@ async function handleMessage(data) {
             break;
 
         case 'assistant_message':
+            lastAssistantText = data.text; // Store for echo detection
             addMessage('assistant', data.text);
             break;
 
@@ -302,8 +312,44 @@ async function waitForAudioEnd() {
     while (isPlaying || audioQueue.length > 0) {
         await new Promise(resolve => setTimeout(resolve, 100));
     }
-    // Extra delay for smooth transition
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // Extended delay to prevent echo pickup (1.5 seconds)
+    await new Promise(resolve => setTimeout(resolve, 1500));
+}
+
+// Echo detection - check if text is similar to what assistant just said
+function isEcho(userText, assistantText) {
+    if (!assistantText) return false;
+
+    // Normalize both strings
+    const normalizeText = (text) => text.toLowerCase()
+        .replace(/[^a-z0-9\s]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const normalUser = normalizeText(userText);
+    const normalAssistant = normalizeText(assistantText);
+
+    // Check if user text contains significant portion of assistant text
+    if (normalUser.length < 5) return false;
+
+    // If user text is very similar to assistant text, it's likely an echo
+    if (normalAssistant.includes(normalUser) || normalUser.includes(normalAssistant)) {
+        return true;
+    }
+
+    // Check word overlap
+    const userWords = normalUser.split(' ');
+    const assistantWords = normalAssistant.split(' ');
+    let matchCount = 0;
+    for (const word of userWords) {
+        if (word.length > 2 && assistantWords.includes(word)) {
+            matchCount++;
+        }
+    }
+
+    // If more than 60% of words match, likely an echo
+    const matchRatio = matchCount / userWords.length;
+    return matchRatio > 0.6;
 }
 
 function stopConversation() {
