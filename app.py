@@ -1,33 +1,53 @@
 import os
 import json
 import asyncio
-from fastapi import FastAPI, WebSocket, Request, Form
+from fastapi import FastAPI, WebSocket, Request, Form, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
-import websockets
+import httpx
+import google.generativeai as genai
 
 # Load environment variables
 load_dotenv()
 
-HUME_API_KEY = os.getenv("HUME_API_KEY")
-HUME_CONFIG_ID = os.getenv("HALEY_VOICE_ID", "62840f23-8309-4a9d-97d3-d419ba7d0f60")
-ACCESS_CODE = "1996"
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+ACCESS_CODE = os.getenv("ACCESS_CODE", "1996")
 
-if not HUME_API_KEY:
-    print("Error: Missing HUME_API_KEY in .env")
+# Validate required keys
+if not ELEVENLABS_API_KEY:
+    print("Warning: Missing ELEVENLABS_API_KEY")
+if not ELEVENLABS_VOICE_ID:
+    print("Warning: Missing ELEVENLABS_VOICE_ID")
+if not GEMINI_API_KEY:
+    print("Warning: Missing GEMINI_API_KEY")
+
+# Configure Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel(
+        "gemini-1.5-flash",
+        system_instruction="""You are Haley, a warm, helpful, and slightly playful personal assistant. 
+Keep your responses concise and conversational - typically 1-3 sentences.
+Be natural and friendly, like talking to a close friend.
+Never use markdown, bullet points, or formatted text - speak naturally."""
+    )
 
 app = FastAPI()
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
+# Store chat histories per session (in production, use Redis or similar)
+chat_sessions = {}
+
 # --- Routes ---
 
 @app.get("/", response_class=HTMLResponse)
 async def get_home(request: Request):
-    # Check for auth cookie
     if request.cookies.get("auth") != ACCESS_CODE:
         return RedirectResponse(url="/login")
     return templates.TemplateResponse("index.html", {"request": request})
@@ -45,75 +65,104 @@ async def post_login(request: Request, code: str = Form(...)):
     else:
         return templates.TemplateResponse("login.html", {"request": request, "error": "Incorrect code"})
 
-# --- WebSocket - Proxy to Hume EVI ---
+# --- WebSocket for Voice Chat ---
 
 @app.websocket("/ws/chat")
-async def websocket_endpoint(client_ws: WebSocket):
-    await client_ws.accept()
-
-    # Build Hume EVI WebSocket URL with authentication and config
-    hume_url = f"wss://api.hume.ai/v0/evi/chat?api_key={HUME_API_KEY}&config_id={HUME_CONFIG_ID}"
-
-    hume_ws = None
-
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    
+    # Create a new chat session
+    session_id = id(ws)
+    chat = model.start_chat(history=[])
+    chat_sessions[session_id] = chat
+    
     try:
-        # Connect to Hume EVI with optimized settings for audio streaming
-        hume_ws = await websockets.connect(
-            hume_url, 
-            max_size=32 * 1024 * 1024,  # 32MB for audio data
-            ping_interval=20,
-            ping_timeout=20,
-            close_timeout=10
-        )
-        print("Connected to Hume EVI")
-
-        # Send session settings for audio format (16kHz mono PCM)
-        session_settings = {
-            "type": "session_settings",
-            "audio": {
-                "encoding": "linear16",
-                "channels": 1,
-                "sample_rate": 16000
-            }
-        }
-        await hume_ws.send(json.dumps(session_settings))
-        print("Sent session settings to Hume")
-
-        async def forward_browser_to_hume():
-            """Forward messages from browser to Hume"""
-            try:
-                while True:
-                    data = await client_ws.receive_text()
-                    await hume_ws.send(data)
-            except Exception as e:
-                print(f"Browser->Hume closed: {e}")
-
-        async def forward_hume_to_browser():
-            """Forward messages from Hume to browser"""
-            try:
-                async for message in hume_ws:
-                    data = json.loads(message)
-                    await client_ws.send_json(data)
-            except Exception as e:
-                print(f"Hume->Browser closed: {e}")
-
-        # Run both directions concurrently
-        await asyncio.gather(
-            forward_browser_to_hume(),
-            forward_hume_to_browser(),
-            return_exceptions=True
-        )
-
-    except websockets.exceptions.ConnectionClosed as e:
-        print(f"Hume connection closed: {e}")
+        while True:
+            # Receive message from browser (text from speech recognition)
+            data = await ws.receive_json()
+            
+            if data.get("type") == "user_message":
+                user_text = data.get("text", "").strip()
+                if not user_text:
+                    continue
+                
+                # Send acknowledgment
+                await ws.send_json({
+                    "type": "user_transcript",
+                    "text": user_text
+                })
+                
+                # Get response from Gemini
+                try:
+                    response = chat.send_message(user_text)
+                    assistant_text = response.text.strip()
+                except Exception as e:
+                    print(f"Gemini error: {e}")
+                    assistant_text = "I'm sorry, I had trouble thinking of a response."
+                
+                # Send assistant text to browser
+                await ws.send_json({
+                    "type": "assistant_message",
+                    "text": assistant_text
+                })
+                
+                # Stream audio from ElevenLabs
+                await stream_elevenlabs_audio(ws, assistant_text)
+                
+    except WebSocketDisconnect:
+        print(f"Client disconnected: {session_id}")
     except Exception as e:
-        print(f"Connection error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"WebSocket error: {e}")
     finally:
-        if hume_ws:
-            await hume_ws.close()
-        try:
-            await client_ws.close()
-        except:
-            pass
+        chat_sessions.pop(session_id, None)
+
+
+async def stream_elevenlabs_audio(ws: WebSocket, text: str):
+    """Stream TTS audio from ElevenLabs to the browser"""
+    
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream"
+    
+    headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg"
+    }
+    
+    payload = {
+        "text": text,
+        "model_id": "eleven_turbo_v2_5",
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+            "style": 0.0,
+            "use_speaker_boost": True
+        }
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            async with client.stream("POST", url, headers=headers, json=payload) as response:
+                if response.status_code != 200:
+                    error_text = await response.aread()
+                    print(f"ElevenLabs error: {response.status_code} - {error_text}")
+                    return
+                
+                # Signal start of audio
+                await ws.send_json({"type": "audio_start"})
+                
+                # Stream audio chunks
+                import base64
+                async for chunk in response.aiter_bytes(chunk_size=4096):
+                    if chunk:
+                        # Send as base64 encoded MP3
+                        await ws.send_json({
+                            "type": "audio_chunk",
+                            "data": base64.b64encode(chunk).decode("utf-8")
+                        })
+                
+                # Signal end of audio
+                await ws.send_json({"type": "audio_end"})
+                
+    except Exception as e:
+        print(f"ElevenLabs streaming error: {e}")
+        await ws.send_json({"type": "audio_error", "message": str(e)})

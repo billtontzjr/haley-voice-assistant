@@ -1,296 +1,345 @@
-// Haley Voice Assistant - Optimized Audio Handling
-// Uses AudioWorklet for capture and improved buffering for playback
+// Haley Voice Assistant - Web Speech API + ElevenLabs Audio
 
-let socket;
-let audioContext;
-let playbackContext;
-let workletNode;
-let isRecording = false;
-
-// Audio playback buffering
+let socket = null;
+let recognition = null;
+let isListening = false;
+let audioContext = null;
 let audioQueue = [];
 let isPlaying = false;
-let nextPlayTime = 0;
-const MIN_BUFFER_CHUNKS = 2; // Wait for this many chunks before starting playback
-let bufferedChunks = 0;
-let hasStartedPlayback = false;
 
-const startBtn = document.getElementById('start-btn');
-const stopBtn = document.getElementById('stop-btn');
-const statusIndicator = document.getElementById('status-indicator');
-const chatContainer = document.getElementById('chat-container');
+// DOM Elements
+const micBtn = document.getElementById('mic-btn');
+const statusBadge = document.getElementById('status-badge');
+const statusText = statusBadge.querySelector('.status-text');
+const chatArea = document.getElementById('chat-area');
+const visualizerContainer = document.getElementById('visualizer-container');
+const listeningText = document.getElementById('listening-text');
 
-startBtn.addEventListener('click', startSession);
-stopBtn.addEventListener('click', stopSession);
+// Initialize
+micBtn.addEventListener('click', toggleConversation);
 
-async function startSession() {
+function toggleConversation() {
+    if (isListening) {
+        stopConversation();
+    } else {
+        startConversation();
+    }
+}
+
+async function startConversation() {
     try {
-        // 1. Request Microphone
-        const stream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-                sampleRate: 16000
-            }
-        });
+        // Check for speech recognition support
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+            alert('Speech recognition is not supported in your browser. Please use Chrome or Edge.');
+            return;
+        }
 
-        // 2. Connect WebSocket
+        // Connect WebSocket
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         socket = new WebSocket(`${protocol}//${window.location.host}/ws/chat`);
 
-        socket.onopen = async () => {
-            statusIndicator.textContent = 'Connected';
-            statusIndicator.classList.add('online');
-            startBtn.disabled = true;
-            stopBtn.disabled = false;
+        socket.onopen = () => {
+            console.log('WebSocket connected');
+            updateStatus('online', 'Connected');
 
-            // Create playback context on user interaction (required by browsers)
-            playbackContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
-            nextPlayTime = 0;
-            hasStartedPlayback = false;
-            bufferedChunks = 0;
+            // Initialize audio context for playback
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
 
-            await startAudioCapture(stream);
+            // Start speech recognition
+            startRecognition();
         };
 
         socket.onmessage = async (event) => {
             const data = JSON.parse(event.data);
-
-            // Handle different Hume EVI message types
-            if (data.type === 'audio_output') {
-                queueAudio(data.data);
-            } else if (data.type === 'user_message') {
-                if (data.message && data.message.content) {
-                    addMessage('user', data.message.content);
-                }
-            } else if (data.type === 'assistant_message') {
-                if (data.message && data.message.content) {
-                    addMessage('assistant', data.message.content);
-                }
-            } else if (data.type === 'user_interruption') {
-                // User interrupted - clear audio queue and reset buffer
-                audioQueue = [];
-                hasStartedPlayback = false;
-                bufferedChunks = 0;
-                nextPlayTime = 0;
-            } else if (data.type === 'error') {
-                console.error('Hume error:', data);
-                addMessage('system', 'Error: ' + (data.message || 'Unknown error'));
-            }
+            await handleMessage(data);
         };
 
-        socket.onclose = (event) => {
-            console.log('WebSocket closed:', event.code, event.reason);
-            stopSession();
+        socket.onclose = () => {
+            console.log('WebSocket closed');
+            stopConversation();
         };
 
         socket.onerror = (error) => {
             console.error('WebSocket error:', error);
+            stopConversation();
         };
 
+        // Update UI
+        isListening = true;
+        micBtn.classList.add('active');
+
     } catch (err) {
-        console.error("Error starting session:", err);
-        alert("Could not access microphone. Please allow permissions.");
+        console.error('Error starting conversation:', err);
+        alert('Could not start conversation: ' + err.message);
     }
 }
 
-async function startAudioCapture(stream) {
-    try {
-        // Try AudioWorklet first (modern, low-latency)
-        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+function startRecognition() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    recognition = new SpeechRecognition();
 
-        await audioContext.audioWorklet.addModule('/static/audio-processor.js');
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
 
-        const source = audioContext.createMediaStreamSource(stream);
-        workletNode = new AudioWorkletNode(audioContext, 'audio-capture-processor');
+    recognition.onstart = () => {
+        updateStatus('listening', 'Listening...');
+        visualizerContainer.classList.add('active');
+        listeningText.textContent = 'Listening...';
+    };
 
-        workletNode.port.onmessage = (event) => {
-            if (!isRecording || !socket || socket.readyState !== WebSocket.OPEN) return;
+    recognition.onresult = (event) => {
+        let finalTranscript = '';
+        let interimTranscript = '';
 
-            if (event.data.type === 'audio') {
-                const base64Audio = arrayBufferToBase64(event.data.buffer);
-                socket.send(JSON.stringify({
-                    type: 'audio_input',
-                    data: base64Audio
-                }));
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+            const transcript = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+                finalTranscript += transcript;
+            } else {
+                interimTranscript += transcript;
             }
-        };
+        }
 
-        source.connect(workletNode);
-        workletNode.connect(audioContext.destination);
-        isRecording = true;
-        console.log('Using AudioWorklet for capture');
+        // Update listening text with interim results
+        if (interimTranscript) {
+            listeningText.textContent = interimTranscript;
+        }
 
-    } catch (err) {
-        console.warn('AudioWorklet not available, falling back to ScriptProcessor:', err);
-        // Fallback to ScriptProcessor for older browsers
-        startAudioCaptureFallback(stream);
-    }
-}
-
-function startAudioCaptureFallback(stream) {
-    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-    const source = audioContext.createMediaStreamSource(stream);
-    const processor = audioContext.createScriptProcessor(8192, 1, 1); // Larger buffer
-
-    let sampleBuffer = new Float32Array(0);
-    const targetSamples = 8192;
-
-    source.connect(processor);
-    processor.connect(audioContext.destination);
-
-    processor.onaudioprocess = (e) => {
-        if (!isRecording || socket.readyState !== WebSocket.OPEN) return;
-
-        const inputData = e.inputBuffer.getChannelData(0);
-
-        // Accumulate samples
-        const newBuffer = new Float32Array(sampleBuffer.length + inputData.length);
-        newBuffer.set(sampleBuffer);
-        newBuffer.set(inputData, sampleBuffer.length);
-        sampleBuffer = newBuffer;
-
-        if (sampleBuffer.length >= targetSamples) {
-            // Convert Float32 to Int16
-            const buffer = new ArrayBuffer(sampleBuffer.length * 2);
-            const view = new DataView(buffer);
-            for (let i = 0; i < sampleBuffer.length; i++) {
-                let s = Math.max(-1, Math.min(1, sampleBuffer[i]));
-                view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-            }
-
-            const base64Audio = arrayBufferToBase64(buffer);
-            socket.send(JSON.stringify({
-                type: 'audio_input',
-                data: base64Audio
-            }));
-
-            sampleBuffer = new Float32Array(0);
+        // Send final transcript to server
+        if (finalTranscript.trim()) {
+            sendMessage(finalTranscript.trim());
         }
     };
 
-    isRecording = true;
-    console.log('Using ScriptProcessor fallback for capture');
+    recognition.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
+        if (event.error === 'no-speech') {
+            // Restart recognition if no speech detected
+            setTimeout(() => {
+                if (isListening && recognition) {
+                    try {
+                        recognition.start();
+                    } catch (e) {
+                        // Already started
+                    }
+                }
+            }, 100);
+        }
+    };
+
+    recognition.onend = () => {
+        // Restart if still listening
+        if (isListening) {
+            setTimeout(() => {
+                if (isListening && recognition) {
+                    try {
+                        recognition.start();
+                    } catch (e) {
+                        // Already started
+                    }
+                }
+            }, 100);
+        }
+    };
+
+    recognition.start();
 }
 
-function arrayBufferToBase64(buffer) {
-    let binary = '';
-    const bytes = new Uint8Array(buffer);
-    const len = bytes.byteLength;
-    for (let i = 0; i < len; i++) {
-        binary += String.fromCharCode(bytes[i]);
-    }
-    return window.btoa(binary);
-}
-
-function stopSession() {
-    isRecording = false;
-    audioQueue = [];
-    isPlaying = false;
-    hasStartedPlayback = false;
-    bufferedChunks = 0;
-    nextPlayTime = 0;
-
-    if (workletNode) {
-        workletNode.disconnect();
-        workletNode = null;
-    }
-    if (audioContext) {
-        audioContext.close();
-        audioContext = null;
-    }
-    if (playbackContext) {
-        playbackContext.close();
-        playbackContext = null;
-    }
+function sendMessage(text) {
     if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.close();
-    }
-    socket = null;
+        socket.send(JSON.stringify({
+            type: 'user_message',
+            text: text
+        }));
 
-    statusIndicator.textContent = 'Offline';
-    statusIndicator.classList.remove('online');
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
-}
-
-function queueAudio(base64Data) {
-    audioQueue.push(base64Data);
-    bufferedChunks++;
-
-    // Pre-buffer before starting playback for smoother audio
-    if (!hasStartedPlayback && bufferedChunks >= MIN_BUFFER_CHUNKS) {
-        hasStartedPlayback = true;
-        playNextAudio();
-    } else if (hasStartedPlayback && !isPlaying) {
-        playNextAudio();
+        // Pause listening while processing
+        if (recognition) {
+            recognition.stop();
+        }
+        updateStatus('speaking', 'Processing...');
+        listeningText.textContent = 'Thinking...';
     }
 }
 
-async function playNextAudio() {
-    if (audioQueue.length === 0) {
-        isPlaying = false;
-        return;
+async function handleMessage(data) {
+    switch (data.type) {
+        case 'user_transcript':
+            addMessage('user', data.text);
+            break;
+
+        case 'assistant_message':
+            addMessage('assistant', data.text);
+            break;
+
+        case 'audio_start':
+            updateStatus('speaking', 'Speaking...');
+            listeningText.textContent = 'Speaking...';
+            audioQueue = [];
+            break;
+
+        case 'audio_chunk':
+            queueAudioChunk(data.data);
+            break;
+
+        case 'audio_end':
+            // Wait for audio to finish, then resume listening
+            await waitForAudioEnd();
+            if (isListening) {
+                updateStatus('listening', 'Listening...');
+                listeningText.textContent = 'Listening...';
+                if (recognition) {
+                    try {
+                        recognition.start();
+                    } catch (e) {
+                        // Already started
+                    }
+                }
+            }
+            break;
+
+        case 'audio_error':
+            console.error('Audio error:', data.message);
+            if (isListening) {
+                updateStatus('listening', 'Listening...');
+                if (recognition) {
+                    recognition.start();
+                }
+            }
+            break;
+    }
+}
+
+function queueAudioChunk(base64Data) {
+    // Decode base64 to array buffer
+    const binaryString = atob(base64Data);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
     }
 
-    if (!playbackContext || playbackContext.state === 'closed') {
-        console.error('Playback context not available');
+    audioQueue.push(bytes.buffer);
+
+    if (!isPlaying) {
+        playAudioQueue();
+    }
+}
+
+async function playAudioQueue() {
+    if (audioQueue.length === 0 || !audioContext) {
         isPlaying = false;
         return;
     }
 
     isPlaying = true;
-    const base64Data = audioQueue.shift();
+
+    // Resume audio context if suspended
+    if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+    }
+
+    // Combine all chunks into one buffer
+    const combinedBuffer = combineArrayBuffers(audioQueue);
+    audioQueue = [];
 
     try {
-        // Resume context if suspended (browser autoplay policy)
-        if (playbackContext.state === 'suspended') {
-            await playbackContext.resume();
-        }
+        // Decode MP3 audio
+        const audioBuffer = await audioContext.decodeAudioData(combinedBuffer);
 
-        // Decode base64 to ArrayBuffer
-        const binaryString = atob(base64Data);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-        }
-
-        // Convert Int16 PCM to Float32 for Web Audio API
-        const int16Array = new Int16Array(bytes.buffer);
-        const float32Array = new Float32Array(int16Array.length);
-        for (let i = 0; i < int16Array.length; i++) {
-            float32Array[i] = int16Array[i] / 32768.0;
-        }
-
-        // Create audio buffer and play
-        const audioBuffer = playbackContext.createBuffer(1, float32Array.length, 24000);
-        audioBuffer.getChannelData(0).set(float32Array);
-
-        const source = playbackContext.createBufferSource();
+        // Play the audio
+        const source = audioContext.createBufferSource();
         source.buffer = audioBuffer;
-        source.connect(playbackContext.destination);
-
-        // Schedule seamless playback with small overlap buffer
-        const currentTime = playbackContext.currentTime;
-        const startTime = Math.max(currentTime + 0.01, nextPlayTime); // 10ms buffer
-        nextPlayTime = startTime + audioBuffer.duration - 0.005; // 5ms overlap
+        source.connect(audioContext.destination);
 
         source.onended = () => {
-            playNextAudio();
+            if (audioQueue.length > 0) {
+                playAudioQueue();
+            } else {
+                isPlaying = false;
+            }
         };
 
-        source.start(startTime);
+        source.start();
     } catch (e) {
-        console.error('Audio playback error:', e);
-        playNextAudio();
+        console.error('Audio decode error:', e);
+        isPlaying = false;
+
+        // Try to play remaining chunks
+        if (audioQueue.length > 0) {
+            setTimeout(() => playAudioQueue(), 100);
+        }
     }
 }
 
+function combineArrayBuffers(buffers) {
+    const totalLength = buffers.reduce((sum, buf) => sum + buf.byteLength, 0);
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const buf of buffers) {
+        result.set(new Uint8Array(buf), offset);
+        offset += buf.byteLength;
+    }
+    return result.buffer;
+}
+
+async function waitForAudioEnd() {
+    // Wait for audio queue to empty and playback to finish
+    while (isPlaying || audioQueue.length > 0) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    // Extra delay for smooth transition
+    await new Promise(resolve => setTimeout(resolve, 500));
+}
+
+function stopConversation() {
+    isListening = false;
+
+    if (recognition) {
+        recognition.stop();
+        recognition = null;
+    }
+
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.close();
+    }
+    socket = null;
+
+    if (audioContext) {
+        audioContext.close();
+        audioContext = null;
+    }
+
+    audioQueue = [];
+    isPlaying = false;
+
+    // Update UI
+    micBtn.classList.remove('active');
+    visualizerContainer.classList.remove('active');
+    updateStatus('offline', 'Offline');
+}
+
+function updateStatus(state, text) {
+    statusBadge.className = 'status-badge ' + state;
+    statusText.textContent = text;
+}
+
 function addMessage(role, text) {
+    // Remove welcome message if present
+    const welcome = chatArea.querySelector('.welcome-message');
+    if (welcome) {
+        welcome.remove();
+    }
+
     const div = document.createElement('div');
     div.className = `message ${role}`;
-    div.innerHTML = `<div class="bubble">${text}</div>`;
-    chatContainer.appendChild(div);
-    chatContainer.scrollTop = chatContainer.scrollHeight;
+    div.innerHTML = `<div class="bubble">${escapeHtml(text)}</div>`;
+    chatArea.appendChild(div);
+    chatArea.scrollTop = chatArea.scrollHeight;
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }

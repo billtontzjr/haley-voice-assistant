@@ -4,27 +4,62 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Haley Voice Assistant</title>
+    <title>Haley - Your Voice Assistant</title>
+    <meta name="description" content="Haley is your personal AI voice assistant, ready to chat and help.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 
 <body>
     <div class="app-container">
+        <!-- Header -->
         <header>
-            <h1>Haley</h1>
-            <div class="status-indicator" id="status-indicator">Offline</div>
+            <div class="logo">
+                <div class="logo-icon">H</div>
+                <span class="logo-text">Haley</span>
+            </div>
+            <div class="status-badge" id="status-badge">
+                <span class="status-dot"></span>
+                <span class="status-text">Offline</span>
+            </div>
         </header>
 
-        <main class="chat-container" id="chat-container">
-            <!-- Chat messages will appear here -->
-            <div class="message assistant">
-                <div class="bubble">Hello! Click "Start" to talk to me.</div>
+        <!-- Chat Area -->
+        <main class="chat-area" id="chat-area">
+            <div class="welcome-message">
+                <div class="avatar">
+                    <div class="avatar-inner">H</div>
+                </div>
+                <h2>Hello! I'm Haley</h2>
+                <p>Click the button below to start a conversation with me.</p>
             </div>
         </main>
 
+        <!-- Voice Visualizer -->
+        <div class="visualizer-container" id="visualizer-container">
+            <div class="visualizer">
+                <div class="bar"></div>
+                <div class="bar"></div>
+                <div class="bar"></div>
+                <div class="bar"></div>
+                <div class="bar"></div>
+            </div>
+            <p class="listening-text" id="listening-text">Listening...</p>
+        </div>
+
+        <!-- Controls -->
         <div class="controls">
-            <button id="start-btn" class="btn primary">Start Conversation</button>
-            <button id="stop-btn" class="btn secondary" disabled>Stop</button>
+            <button id="mic-btn" class="mic-button">
+                <svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                    <line x1="12" y1="19" x2="12" y2="23"></line>
+                    <line x1="8" y1="23" x2="16" y2="23"></line>
+                </svg>
+                <span class="btn-text">Start Conversation</span>
+            </button>
         </div>
     </div>
 
