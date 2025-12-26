@@ -57,8 +57,14 @@ async def websocket_endpoint(client_ws: WebSocket):
     hume_ws = None
 
     try:
-        # Connect to Hume EVI
-        hume_ws = await websockets.connect(hume_url, max_size=16 * 1024 * 1024)
+        # Connect to Hume EVI with optimized settings for audio streaming
+        hume_ws = await websockets.connect(
+            hume_url, 
+            max_size=32 * 1024 * 1024,  # 32MB for audio data
+            ping_interval=20,
+            ping_timeout=20,
+            close_timeout=10
+        )
         print("Connected to Hume EVI")
 
         # Send session settings for audio format (16kHz mono PCM)

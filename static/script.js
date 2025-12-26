@@ -1,10 +1,19 @@
+// Haley Voice Assistant - Optimized Audio Handling
+// Uses AudioWorklet for capture and improved buffering for playback
+
 let socket;
 let audioContext;
 let playbackContext;
+let workletNode;
 let isRecording = false;
+
+// Audio playback buffering
 let audioQueue = [];
 let isPlaying = false;
 let nextPlayTime = 0;
+const MIN_BUFFER_CHUNKS = 2; // Wait for this many chunks before starting playback
+let bufferedChunks = 0;
+let hasStartedPlayback = false;
 
 const startBtn = document.getElementById('start-btn');
 const stopBtn = document.getElementById('stop-btn');
@@ -17,13 +26,20 @@ stopBtn.addEventListener('click', stopSession);
 async function startSession() {
     try {
         // 1. Request Microphone
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+                sampleRate: 16000
+            }
+        });
 
         // 2. Connect WebSocket
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         socket = new WebSocket(`${protocol}//${window.location.host}/ws/chat`);
 
-        socket.onopen = () => {
+        socket.onopen = async () => {
             statusIndicator.textContent = 'Connected';
             statusIndicator.classList.add('online');
             startBtn.disabled = true;
@@ -32,31 +48,32 @@ async function startSession() {
             // Create playback context on user interaction (required by browsers)
             playbackContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
             nextPlayTime = 0;
+            hasStartedPlayback = false;
+            bufferedChunks = 0;
 
-            startAudioCapture(stream);
+            await startAudioCapture(stream);
         };
 
         socket.onmessage = async (event) => {
             const data = JSON.parse(event.data);
-            console.log('Received:', data.type, data);
 
             // Handle different Hume EVI message types
             if (data.type === 'audio_output') {
-                // Queue audio for playback
                 queueAudio(data.data);
             } else if (data.type === 'user_message') {
-                // User's transcribed speech
                 if (data.message && data.message.content) {
                     addMessage('user', data.message.content);
                 }
             } else if (data.type === 'assistant_message') {
-                // Assistant's text response
                 if (data.message && data.message.content) {
                     addMessage('assistant', data.message.content);
                 }
             } else if (data.type === 'user_interruption') {
-                // User interrupted - clear audio queue
+                // User interrupted - clear audio queue and reset buffer
                 audioQueue = [];
+                hasStartedPlayback = false;
+                bufferedChunks = 0;
+                nextPlayTime = 0;
             } else if (data.type === 'error') {
                 console.error('Hume error:', data);
                 addMessage('system', 'Error: ' + (data.message || 'Unknown error'));
@@ -78,10 +95,47 @@ async function startSession() {
     }
 }
 
-function startAudioCapture(stream) {
+async function startAudioCapture(stream) {
+    try {
+        // Try AudioWorklet first (modern, low-latency)
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+
+        await audioContext.audioWorklet.addModule('/static/audio-processor.js');
+
+        const source = audioContext.createMediaStreamSource(stream);
+        workletNode = new AudioWorkletNode(audioContext, 'audio-capture-processor');
+
+        workletNode.port.onmessage = (event) => {
+            if (!isRecording || !socket || socket.readyState !== WebSocket.OPEN) return;
+
+            if (event.data.type === 'audio') {
+                const base64Audio = arrayBufferToBase64(event.data.buffer);
+                socket.send(JSON.stringify({
+                    type: 'audio_input',
+                    data: base64Audio
+                }));
+            }
+        };
+
+        source.connect(workletNode);
+        workletNode.connect(audioContext.destination);
+        isRecording = true;
+        console.log('Using AudioWorklet for capture');
+
+    } catch (err) {
+        console.warn('AudioWorklet not available, falling back to ScriptProcessor:', err);
+        // Fallback to ScriptProcessor for older browsers
+        startAudioCaptureFallback(stream);
+    }
+}
+
+function startAudioCaptureFallback(stream) {
     audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
     const source = audioContext.createMediaStreamSource(stream);
-    const processor = audioContext.createScriptProcessor(4096, 1, 1);
+    const processor = audioContext.createScriptProcessor(8192, 1, 1); // Larger buffer
+
+    let sampleBuffer = new Float32Array(0);
+    const targetSamples = 8192;
 
     source.connect(processor);
     processor.connect(audioContext.destination);
@@ -91,24 +145,33 @@ function startAudioCapture(stream) {
 
         const inputData = e.inputBuffer.getChannelData(0);
 
-        // Convert Float32 to Int16
-        const buffer = new ArrayBuffer(inputData.length * 2);
-        const view = new DataView(buffer);
-        for (let i = 0; i < inputData.length; i++) {
-            let s = Math.max(-1, Math.min(1, inputData[i]));
-            view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true); // little-endian
+        // Accumulate samples
+        const newBuffer = new Float32Array(sampleBuffer.length + inputData.length);
+        newBuffer.set(sampleBuffer);
+        newBuffer.set(inputData, sampleBuffer.length);
+        sampleBuffer = newBuffer;
+
+        if (sampleBuffer.length >= targetSamples) {
+            // Convert Float32 to Int16
+            const buffer = new ArrayBuffer(sampleBuffer.length * 2);
+            const view = new DataView(buffer);
+            for (let i = 0; i < sampleBuffer.length; i++) {
+                let s = Math.max(-1, Math.min(1, sampleBuffer[i]));
+                view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+            }
+
+            const base64Audio = arrayBufferToBase64(buffer);
+            socket.send(JSON.stringify({
+                type: 'audio_input',
+                data: base64Audio
+            }));
+
+            sampleBuffer = new Float32Array(0);
         }
-
-        // Convert to Base64
-        const base64Audio = arrayBufferToBase64(buffer);
-
-        socket.send(JSON.stringify({
-            type: 'audio_input',
-            data: base64Audio
-        }));
     };
 
     isRecording = true;
+    console.log('Using ScriptProcessor fallback for capture');
 }
 
 function arrayBufferToBase64(buffer) {
@@ -125,8 +188,14 @@ function stopSession() {
     isRecording = false;
     audioQueue = [];
     isPlaying = false;
+    hasStartedPlayback = false;
+    bufferedChunks = 0;
     nextPlayTime = 0;
 
+    if (workletNode) {
+        workletNode.disconnect();
+        workletNode = null;
+    }
     if (audioContext) {
         audioContext.close();
         audioContext = null;
@@ -148,7 +217,13 @@ function stopSession() {
 
 function queueAudio(base64Data) {
     audioQueue.push(base64Data);
-    if (!isPlaying) {
+    bufferedChunks++;
+
+    // Pre-buffer before starting playback for smoother audio
+    if (!hasStartedPlayback && bufferedChunks >= MIN_BUFFER_CHUNKS) {
+        hasStartedPlayback = true;
+        playNextAudio();
+    } else if (hasStartedPlayback && !isPlaying) {
         playNextAudio();
     }
 }
@@ -196,17 +271,16 @@ async function playNextAudio() {
         source.buffer = audioBuffer;
         source.connect(playbackContext.destination);
 
-        // Schedule seamless playback
+        // Schedule seamless playback with small overlap buffer
         const currentTime = playbackContext.currentTime;
-        const startTime = Math.max(currentTime, nextPlayTime);
-        nextPlayTime = startTime + audioBuffer.duration;
+        const startTime = Math.max(currentTime + 0.01, nextPlayTime); // 10ms buffer
+        nextPlayTime = startTime + audioBuffer.duration - 0.005; // 5ms overlap
 
         source.onended = () => {
             playNextAudio();
         };
 
         source.start(startTime);
-        console.log('Playing audio chunk, duration:', audioBuffer.duration);
     } catch (e) {
         console.error('Audio playback error:', e);
         playNextAudio();
