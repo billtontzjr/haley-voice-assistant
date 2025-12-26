@@ -48,6 +48,17 @@ async function startConversation() {
             // Initialize audio context for playback
             audioContext = new (window.AudioContext || window.webkitAudioContext)();
 
+            // iOS requires audio context to be resumed on user gesture
+            // This happens here because the button click is a user gesture
+            if (audioContext.state === 'suspended') {
+                audioContext.resume().then(() => {
+                    console.log('AudioContext resumed');
+                });
+            }
+
+            // iOS audio unlock hack - play a silent buffer to "unlock" audio
+            unlockAudioForIOS();
+
             // Start speech recognition
             startRecognition();
         };
@@ -258,9 +269,14 @@ async function playAudioQueue() {
 
     isPlaying = true;
 
-    // Resume audio context if suspended
+    // iOS: Always try to resume audio context before playing
     if (audioContext.state === 'suspended') {
-        await audioContext.resume();
+        try {
+            await audioContext.resume();
+            console.log('AudioContext resumed for playback');
+        } catch (e) {
+            console.error('Failed to resume AudioContext:', e);
+        }
     }
 
     // Combine all chunks into one buffer
@@ -269,7 +285,7 @@ async function playAudioQueue() {
 
     try {
         // Decode MP3 audio
-        const audioBuffer = await audioContext.decodeAudioData(combinedBuffer);
+        const audioBuffer = await audioContext.decodeAudioData(combinedBuffer.slice(0));
 
         // Play the audio
         const source = audioContext.createBufferSource();
@@ -305,6 +321,23 @@ function combineArrayBuffers(buffers) {
         offset += buf.byteLength;
     }
     return result.buffer;
+}
+
+// iOS audio unlock hack - plays a silent buffer to "unlock" audio playback
+function unlockAudioForIOS() {
+    if (!audioContext) return;
+
+    // Create a silent buffer (1 sample of silence)
+    const buffer = audioContext.createBuffer(1, 1, 22050);
+    const source = audioContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioContext.destination);
+
+    // Play the silent buffer
+    source.start(0);
+    source.stop(0.001);
+
+    console.log('iOS audio unlocked');
 }
 
 async function waitForAudioEnd() {
