@@ -3,6 +3,7 @@
 let socket = null;
 let recognition = null;
 let isListening = false;
+let isSpeaking = false; // Prevents recognition during audio playback
 let audioContext = null;
 let audioQueue = [];
 let isPlaying = false;
@@ -90,6 +91,11 @@ function startRecognition() {
     };
 
     recognition.onresult = (event) => {
+        // Ignore any recognition results while speaking
+        if (isSpeaking) {
+            return;
+        }
+
         let finalTranscript = '';
         let interimTranscript = '';
 
@@ -174,6 +180,10 @@ async function handleMessage(data) {
             break;
 
         case 'audio_start':
+            isSpeaking = true; // Block recognition
+            if (recognition) {
+                recognition.stop();
+            }
             updateStatus('speaking', 'Speaking...');
             listeningText.textContent = 'Speaking...';
             audioQueue = [];
@@ -186,16 +196,20 @@ async function handleMessage(data) {
         case 'audio_end':
             // Wait for audio to finish, then resume listening
             await waitForAudioEnd();
+            isSpeaking = false; // Allow recognition again
             if (isListening) {
                 updateStatus('listening', 'Listening...');
                 listeningText.textContent = 'Listening...';
-                if (recognition) {
-                    try {
-                        recognition.start();
-                    } catch (e) {
-                        // Already started
+                // Delay before restarting to avoid picking up echo
+                setTimeout(() => {
+                    if (recognition && isListening && !isSpeaking) {
+                        try {
+                            recognition.start();
+                        } catch (e) {
+                            // Already started
+                        }
                     }
-                }
+                }, 500);
             }
             break;
 

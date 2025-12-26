@@ -18,12 +18,18 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ACCESS_CODE = os.getenv("ACCESS_CODE", "1996")
 
 # Validate required keys
+missing_keys = []
 if not ELEVENLABS_API_KEY:
-    print("Warning: Missing ELEVENLABS_API_KEY")
+    missing_keys.append("ELEVENLABS_API_KEY")
 if not ELEVENLABS_VOICE_ID:
-    print("Warning: Missing ELEVENLABS_VOICE_ID")
+    missing_keys.append("ELEVENLABS_VOICE_ID")
 if not GEMINI_API_KEY:
-    print("Warning: Missing GEMINI_API_KEY")
+    missing_keys.append("GEMINI_API_KEY")
+
+if missing_keys:
+    print(f"WARNING: Missing environment variables: {', '.join(missing_keys)}")
+else:
+    print("All required environment variables are set.")
 
 # Configure Gemini
 if GEMINI_API_KEY:
@@ -94,11 +100,18 @@ async def websocket_endpoint(ws: WebSocket):
                 
                 # Get response from Gemini
                 try:
+                    if not GEMINI_API_KEY:
+                        raise Exception("GEMINI_API_KEY not configured")
                     response = chat.send_message(user_text)
                     assistant_text = response.text.strip()
+                    if not assistant_text:
+                        assistant_text = "Hmm, let me think about that."
+                    print(f"Gemini response: {assistant_text[:100]}...")
                 except Exception as e:
-                    print(f"Gemini error: {e}")
-                    assistant_text = "I'm sorry, I had trouble thinking of a response."
+                    print(f"Gemini error: {type(e).__name__}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    assistant_text = "I'm having a little trouble right now. Could you try again?"
                 
                 # Send assistant text to browser
                 await ws.send_json({
