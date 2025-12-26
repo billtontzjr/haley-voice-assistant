@@ -35,7 +35,7 @@ else:
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel(
-        "gemini-1.5-flash",
+        "gemini-pro",
         system_instruction="""You are Haley, a warm, helpful, and slightly playful personal assistant. 
 Keep your responses concise and conversational - typically 1-3 sentences.
 Be natural and friendly, like talking to a close friend.
@@ -90,7 +90,7 @@ async def debug_gemini():
     
     try:
         # Test Gemini
-        test_model = genai.GenerativeModel("gemini-1.5-flash")
+        test_model = genai.GenerativeModel("gemini-pro")
         response = test_model.generate_content("Say hello in one word")
         result["gemini_test"] = "SUCCESS"
         result["gemini_response"] = response.text[:100] if response.text else "Empty response"
