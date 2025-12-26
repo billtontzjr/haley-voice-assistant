@@ -71,6 +71,36 @@ async def post_login(request: Request, code: str = Form(...)):
     else:
         return templates.TemplateResponse("login.html", {"request": request, "error": "Incorrect code"})
 
+# --- Debug endpoint to test Gemini ---
+@app.get("/debug")
+async def debug_gemini():
+    """Test Gemini API connection and show actual errors"""
+    import traceback
+    
+    result = {
+        "gemini_api_key_set": bool(GEMINI_API_KEY),
+        "gemini_api_key_preview": GEMINI_API_KEY[:10] + "..." if GEMINI_API_KEY else None,
+        "elevenlabs_api_key_set": bool(ELEVENLABS_API_KEY),
+        "elevenlabs_voice_id_set": bool(ELEVENLABS_VOICE_ID),
+    }
+    
+    if not GEMINI_API_KEY:
+        result["error"] = "GEMINI_API_KEY not configured"
+        return result
+    
+    try:
+        # Test Gemini
+        test_model = genai.GenerativeModel("gemini-1.5-flash")
+        response = test_model.generate_content("Say hello in one word")
+        result["gemini_test"] = "SUCCESS"
+        result["gemini_response"] = response.text[:100] if response.text else "Empty response"
+    except Exception as e:
+        result["gemini_test"] = "FAILED"
+        result["gemini_error"] = f"{type(e).__name__}: {str(e)}"
+        result["traceback"] = traceback.format_exc()
+    
+    return result
+
 # --- WebSocket for Voice Chat ---
 
 @app.websocket("/ws/chat")
